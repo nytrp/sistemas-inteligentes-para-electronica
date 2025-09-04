@@ -24,7 +24,7 @@ Repositorio de la asignatura **Sistemas Inteligentes para Electrónica**, donde 
 - Isaac Montes  
 - Yurliana Niebles  
 - Alejandro Martínez  
-
+- Daniel Santiago 
 ---
 
 ## 📌 Notas
