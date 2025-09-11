@@ -1,0 +1,167 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Clasificador de Colores con TCS34725, IQR, EEPROM y KNN en Arduino (Optimizado)}
+\author{
+  \IEEEauthorblockN{Alejandro Martinez\\Daniel Santiago\\Yurliana Niebles\\Isaac Montes}
+  \\
+  \IEEEauthorblockA{\IEEEauthorrefmark{1} Universidad De la Costa \\
+  \texttt{}}
+}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Se presenta el diseño, implementación y análisis de un sistema embebido basado en Arduino que utiliza el sensor de color TCS34725, filtrado robusto mediante IQR (Interquartile Range), almacenamiento en EEPROM y un clasificador KNN manual optimizado. El objetivo del sistema es reconocer tres clases de color (ROJO, NARANJA, VERDE) con bajos requerimientos de memoria y procesamiento. Se describen las decisiones de diseño, las fórmulas matemáticas usadas y una propuesta de flujo experimental.
+\end{abstract}
+
+\begin{IEEEkeywords}
+TCS34725, IQR, EEPROM, KNN, Arduino, centroides, clasificación de color
+\end{IEEEkeywords}
+
+\section{Introducción}
+La clasificación de colores con sensores embebidos es una tarea común en robótica y sistemas de visión industrial de bajo coste. Este trabajo describe una implementación práctica que busca conservar la memoria y CPU del microcontrolador al tiempo que mantiene robustez ante lecturas ruidosas. El sensor TCS34725 provee medidas crudas R/G/B y un canal de claridad C que se emplea para normalizar.
+
+\section{Objetivo}
+Implementar y documentar un sistema que:
+\begin{itemize}
+  \item Tome múltiples lecturas por muestra y elimine outliers mediante IQR.
+  \item Acumule muestras por clase y calcule centroides (media) de forma eficiente en memoria.
+  \item Guarde centroides en EEPROM para uso posterior por el clasificador KNN.
+  \item Clasifique lecturas rápidas (1 muestra) e informe probabilidades por clase.
+  \item Mida el tiempo total (lectura + clasificación) por petición.
+\end{itemize}
+
+\section{Marco teórico}
+\subsection{Sensor TCS34725}
+Sensor de color que entrega valores crudos por canales rojo (R), verde (G), azul (B) y claridad (C). La lectura C se usa para normalizar y compensar variaciones de iluminación.
+
+\subsection{Filtrado IQR (Interquartile Range)}
+Se toma un conjunto de $n$ lecturas por canal (en este caso $n=20$) y se ordenan. Definimos:
+\[
+Q1 = \text{mediana del primer cuartil}, \quad Q3 = \text{mediana del tercer cuartil}
+\]
+\[
+IQR = Q3 - Q1
+\]
+Los límites aceptables son:
+\[
+\text{lower} = Q1 - 1.5 \cdot IQR,\qquad \text{upper} = Q3 + 1.5 \cdot IQR
+\]
+Se promedian solo las muestras dentro de esos límites. Si no queda ninguna muestra, se utiliza la mediana como fallback.
+
+\subsection{Centroides}
+Para una clase con $n$ muestras y valores por canal $x_i$ (por ejemplo $r_i$), el centroide (media) se calcula como:
+\[
+\bar{r} = \frac{1}{n}\sum_{i=1}^{n} r_i
+\]
+Se calcula por cada canal (R, G, B, C) y se guarda en EEPROM como valores \texttt{uint16\_t}.
+
+\subsection{KNN y distancia al cuadrado}
+Para evitar cálculo de raíz cuadrada se emplea la distancia euclídea al cuadrado entre vectores de 3 componentes normalizados (r/c, g/c, b/c):
+\[
+d^2(\mathbf{x},\mathbf{y}) = (x_r - y_r)^2 + (x_g - y_g)^2 + (x_b - y_b)^2
+\]
+Se seleccionan los $K$ vecinos de menor distancia. Para desempates se utiliza el vecino global más cercano.
+
+\subsection{Probabilidades a partir de pesos inversos}
+Para proporcionar una probabilidad relativa por clase, se usan pesos inversos de distancia:
+\[
+w_i = \frac{1}{d_i + \varepsilon}
+\]
+Se suman pesos por clase y la probabilidad en \% es:
+\[
+P(\text{clase } j) = \frac{\sum_{i\in \text{clase } j} w_i}{\sum_{i} w_i}\times 100\%
+\]
+Si alguna distancia es cero (muestra idéntica al centroide), se maneja como caso especial dando peso directo a la(s) clase(s) con distancia cero.
+
+\section{Explicación del código (resumen por bloques)}
+A continuación se expone de forma compacta el propósito de los bloques principales del código final:
+
+\subsection{Definiciones iniciales}
+\begin{itemize}
+  \item Se incluyen \texttt{Wire.h}, \texttt{Adafruit\_TCS34725.h}, \texttt{EEPROM.h}.
+  \item Constantes importantes: \texttt{SAMPLES=20}, offsets de EEPROM (\texttt{ADDR\_RED}, \dots), \texttt{MAGIC\_BYTE}.
+  \item Estructura \texttt{ColorVals} que agrupa \texttt{uint16\_t r,g,b,c}.
+\end{itemize}
+
+\subsection{Muestreo \& IQR}
+Función \texttt{takeSampleIQR(\&r,\&g,\&b,\&c)}:
+\begin{enumerate}
+  \item Toma 20 lecturas: guarda arrays \texttt{rS, gS, bS, cS}.
+  \item Ordena (insertion sort) y aplica rango IQR por canal.
+  \item Devuelve valores limpios por referencia.
+\end{enumerate}
+
+\subsection{Acumulación y centroides}
+\begin{itemize}
+  \item En lugar de guardar todas las muestras en RAM, el código mantiene \texttt{sumR,sumG,sumB,sumC} y contadores \texttt{cnt} por clase.
+  \item Al alcanzar mínimo (por ejemplo 3 muestras por clase) o al forzar con comando \texttt{W}, se calcula:
+  \[
+  cr = \frac{sumR}{cnt}, \ \text{etc.}
+  \]
+  y se escriben en EEPROM usando \texttt{writeU16}.
+\end{itemize}
+
+\subsection{Construcción del dataset KNN}
+Tras escribir/leer centroides, el sketch normaliza por C (o por suma R+G+B si C=0) y guarda vectores normalizados en \texttt{datasetX} para uso en clasificación.
+
+\subsection{Clasificación y probabilidades}
+\begin{enumerate}
+  \item En \texttt{classifyManual} se normaliza la muestra y se calculan las distancias (al cuadrado) frente a los centroides.
+  \item Se eligen los $K$ más cercanos y se cuentan votos.
+  \item Se calculan pesos inversos de distancia para estimar probabilidades por clase (manejo especial si alguna distancia es cero).
+  \item Se imprimen los porcentajes por clase y se retorna la clase ganadora.
+\end{enumerate}
+
+\subsection{Medición de tiempo}
+En el comando de clasificación (\texttt{C}) se mide tiempo total con \texttt{micros()}:
+\[
+\text{elapsed\_ms} = \frac{micros\_end - micros\_start}{1000.0}
+\]
+y se imprime el tiempo (ms) que tarda la lectura + clasificación.
+
+\section{Cálculos y resultados (ejemplo)}
+A modo de ejemplo muestro la plantilla de resultados que puedes completar con datos reales recogidos en experimentos:
+
+\begin{table}[htbp]
+\centering
+\caption{Ejemplo de tabla de resultados (rellenar con datos experimentales).}
+
+
+\begin{tabular}{llllllllll}
+\cline{10-10}
+ID & R  & G   & B  & C   & prediccion & P(roja) & P(Roja) & \multicolumn{1}{l|}{P(Verde)} & \multicolumn{1}{l|}{tiempo} \\ \cline{10-10} 
+1  & 88 & 153 & 58 & 309 & verde      & 0\%     & 0\%     & 10\%                          & 62.124 ms                   \\
+2  & 11 & 68  & 42 & 227 & naranja    & 16\%    & 80\%    & 4\%                           & 62.296 ms                   \\
+3  & 98 & 38  & 30 & 165 & rojo       & 97\%    & 3\%     & 0\%                           & 61.872 ms                  
+\end{tabular}
+\end{table}
+
+\subsection{Interpretación}
+\begin{itemize}
+  \item Las probabilidades permiten evaluar la confianza relativa del clasificador en cada decisión.
+  \item El tiempo medido incluye la lectura hardware y la ejecución del KNN; con lecturas únicas se mantienen tiempos bajos (milisegundos).
+\end{itemize}
+
+\section{Conclusiones}
+\begin{itemize}
+  \item El uso de IQR en cada canal reduce de forma efectiva la influencia de outliers en lecturas del sensor.
+  \item Calcular centroides vía sumas acumuladas reduce significativamente el uso de memoria RAM frente a almacenar todas las muestras.
+  \item KNN con centroides (1 centroide por clase) favorece K=1; sin embargo, el uso de pesos inversos de distancia permite entregar una estimación probabilística útil.
+  \item La estrategia implementada es adecuada para microcontroladores con recursos limitados, manteniendo precisión y capacidad de adaptación por recalibración.
+\end{itemize}
+
+\section*{Agradecimientos}
+A los miembros del equipo y a las bibliotecas libres que hacen posible el proyecto (Adafruit, Arduino).
+
+\vfill
+
+\end{document}
